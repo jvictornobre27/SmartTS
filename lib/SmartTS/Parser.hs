@@ -38,6 +38,8 @@ reservedWords =
   , "val"
   , "true"
   , "false"
+  , "fail_with"
+  , "require"
   ]
 
 identifier :: Parser String
@@ -116,7 +118,8 @@ parseAtomOrStorage =
 
 parseAtom :: Parser ParsedExpr
 parseAtom =
-  parseUnit
+  parseFailWith
+    <|> parseUnit
     <|> parseRecordExpr
     <|> parseBool
     <|> parseInt
@@ -161,6 +164,12 @@ parseUnit = do
   _ <- symbol "()"
   return (Unit ())
 
+parseFailWith :: Parser ParsedExpr
+parseFailWith = do
+  _ <- reserved "fail_with"
+  payload <- parens parseExpr
+  return (FailWith () payload)
+
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
@@ -170,13 +179,25 @@ braces = between (symbol "{") (symbol "}")
 -- Statements
 parseStmt :: Parser ParsedStmt
 parseStmt =
-  parseIfStmt
+  parseRequire
+    <|> parseIfStmt
     <|> parseWhileStmt
     <|> parseVarDeclStmt
     <|> parseValDeclStmt
     <|> parseReturn
     <|> parseAssignment
     <|> parseBlock
+
+parseRequire :: Parser ParsedStmt
+parseRequire = do
+  _ <- reserved "require"
+  _ <- symbol "("
+  cond <- parseExpr
+  _ <- symbol ","
+  payload <- parseExpr
+  _ <- symbol ")"
+  _ <- symbol ";"
+  return (RequireStmt cond payload)
 
 parseVarDeclStmt :: Parser ParsedStmt
 parseVarDeclStmt = do
