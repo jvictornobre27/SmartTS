@@ -30,6 +30,7 @@ data Type = TInt
           | TBool
           | TUnit
           | TRecord [(Name, Type)]
+          | TNever
   deriving (Eq, Show)
 
 type Name = String
@@ -57,6 +58,7 @@ data Expr a
   | Record  a [(Name, Expr a)]
   | Unit    a
   | Call    a Name [Expr a]
+  | FailWith a (Expr a)
   deriving (Eq, Show)
 
 -- | Extract the annotation from any expression node.
@@ -83,6 +85,7 @@ exprAnn (Gte a _ _)         = a
 exprAnn (Record a _)        = a
 exprAnn (Unit a)            = a
 exprAnn (Call a _ _)        = a
+exprAnn (FailWith a _)      = a
 
 type MethodBody a = Stmt a
 
@@ -102,6 +105,7 @@ data Stmt a
   | WhileStmt (Expr a) (Stmt a)                 -- (condition, body)
   | ReturnStmt (Expr a)
   | SequenceStmt [Stmt a]
+  | RequireStmt (Expr a) (Expr a)
   deriving (Eq, Show)
 
 -- | Type aliases for the two phases of the compilation pipeline.
