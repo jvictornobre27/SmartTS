@@ -18,6 +18,8 @@ exprToJson (Record _ fields) =
       | (k, v) <- fields
       ]
 exprToJson (Unit _) = Null
+exprToJson (FailWith _ payload) =
+  Object $ KM.fromList [(fromStringKey "FAILWITH", exprToJson payload)]
 exprToJson _ = Null
 
 jsonToExprByType :: Type -> Value -> Either String TypedExpr
