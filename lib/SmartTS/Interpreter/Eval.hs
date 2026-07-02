@@ -80,6 +80,9 @@ evalExpr (Call _ name args) = do
   case mRet of
     Nothing -> interpretBug ("method `" ++ name ++ "` did not return a value after type check")
     Just v  -> return v
+evalExpr (FailWith _ payload) = do
+  v <- evalExpr payload
+  return (FailWith TNever v)
 
 -- ---------------------------------------------------------------------------
 -- Statement execution
@@ -121,6 +124,8 @@ execStmt (WhileStmt cond body) = loop
             Just v  -> return (Just v)
             Nothing -> loop
         _ -> interpretBug "while condition was not bool after type check"
+execStmt (RequireStmt cond payload) =
+  execStmt (IfStmt (Not TBool cond) (ReturnStmt (FailWith TNever payload)) Nothing)
 
 execSequence :: [TypedStmt] -> EvalM (Maybe TypedExpr)
 execSequence [] = return Nothing
