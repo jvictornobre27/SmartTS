@@ -7,6 +7,7 @@ translateType :: A.Type -> L.Type
 translateType A.TInt             = L.TInt
 translateType A.TBool            = L.TBool
 translateType A.TUnit            = L.TUnit
+translateType A.TNever           = L.TNever
 translateType (A.TRecord fields) = L.TTuple (L.RowNode (map toLeaf fields))
   where
     toLeaf (name, ty) = L.RowLeaf (Just (L.Label name)) (translateType ty)
@@ -21,6 +22,9 @@ translateExpression (A.And ty e1 e2) = translateBinaryExpression e1 e2 ty L.Prim
 translateExpression (A.Or  ty e1 e2) = translateBinaryExpression e1 e2 ty L.PrimOr
 translateExpression (A.Not ty e)     = translateUnaryExpression e ty L.PrimNot
 -- TODO: Write here the translation of the remaining expressions.
+
+translateExpression (A.FailWith ty payload) = mkExpr (L.Prim L.PrimFailwith [payload']) ty
+  where payload' = translateExpression payload
 
 -- | Translate a SmartTS block (a list of statements) into a nested LLTZ let-expression.
 --
@@ -80,7 +84,12 @@ translateStatement (A.WhileStmt cond block) =
 translateStatement (A.ReturnStmt expr) = translateExpression expr
 -- Translate a nested block of statements.
 translateStatement (A.SequenceStmt stmts) = translateBlock stmts
-
+-- require(cond, payload): reuse the same require -> fail_with rewrite the
+-- interpreter uses (SmartTS.IR.AST.desugarRequire) and re-dispatch through
+-- the existing IfStmt case above, instead of duplicating the translation.
+translateStatement (A.RequireStmt cond payload) =
+  translateStatement (A.desugarRequire cond payload)
+    
 -- Auxiliary functions for translating expressions.
 
 mkExpr :: L.ExprDesc -> A.Type -> L.Expr
