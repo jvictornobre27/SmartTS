@@ -125,7 +125,7 @@ execStmt (WhileStmt cond body) = loop
             Nothing -> loop
         _ -> interpretBug "while condition was not bool after type check"
 execStmt (RequireStmt cond payload) =
-  execStmt (IfStmt (Not TBool cond) (ReturnStmt (FailWith TNever payload)) Nothing)
+  execStmt (desugarRequire cond payload)
 
 execSequence :: [TypedStmt] -> EvalM (Maybe TypedExpr)
 execSequence [] = return Nothing

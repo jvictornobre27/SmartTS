@@ -131,3 +131,7 @@ isEntryPointMethod m = methodKind m == EntryPoint
 
 isOriginateMethod :: MethodDecl a -> Bool
 isOriginateMethod m = methodKind m == Originate
+
+desugarRequire :: TypedExpr -> TypedExpr -> TypedStmt
+desugarRequire cond payload =
+  IfStmt (Not TBool cond) (ReturnStmt (FailWith TNever payload)) Nothing
