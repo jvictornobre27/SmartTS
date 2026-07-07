@@ -246,13 +246,19 @@ callEntrypointWithJsonArgs repo c addr entryName sourceText argsJson = do
       m <- findEntryPointByName c entryName
       params <- bindArgsByName (methodArgs m) argsJson
       (ret, rt') <- execMethodWithInitialStorage (instanceStorage ci) m params
-      newStorage <-
-        case rtStorage rt' of
-          Nothing -> Left "Entrypoint cleared `storage`; not allowed."
-          Just s -> Right s
-      let ci' = ci {instanceStorage = newStorage}
-          repo' = M.insert addr ci' repo
-      Right (ret, repo')
+      -- Rollback semântico garantido.
+      -- Se a execução abortou (FailWith), o repositório é devolvido INTACTO.
+      case ret of
+        Just (FailWith _) -> 
+          Right (ret, repo) 
+        _ -> do
+          newStorage <-
+            case rtStorage rt' of
+              Nothing -> Left "Entrypoint cleared `storage`; not allowed."
+              Just s -> Right s
+          let ci' = ci {instanceStorage = newStorage}
+              repo' = M.insert addr ci' repo
+          Right (ret, repo')
 
 execStmt :: Runtime -> Stmt -> Either String (Maybe Expr, Runtime)
 execStmt rt (SequenceStmt ss) = execSequence rt ss
@@ -280,10 +286,17 @@ execStmt rt (IfStmt cond thenS elseS) = do
         Nothing -> Right (Nothing, rt)
         Just es -> execStmt rt es
     _ -> interpretBug "if condition was not bool after type check"
+-- NOVO: O desugaring agora usa o FailWithStmt direto, sem ReturnStmt
 execStmt rt (RequireStmt cond payload) = do
-  -- Desugar: require(c, p) -> if (!c) { return fail_with(p); }
-  let desugared = IfStmt (Not cond) (ReturnStmt (FailWith payload)) Nothing
+-- Desugar: require(c, p) -> if (!c) { fail_with(p); }
+  let desugared = IfStmt (Not cond) (FailWithStmt payload) Nothing
   execStmt rt desugared
+
+-- NOVO: Executando o FailWithStmt.
+-- Ele emite o "Just" (sinal de retorno antecipado), mas embrulhado no nó interno FailWith
+execStmt rt (FailWithStmt payload) = do
+  v <- evalExpr rt payload
+  Right (Just (FailWith v), rt)
 execStmt rt (WhileStmt cond body) = loop rt
   where
     loop cur = do

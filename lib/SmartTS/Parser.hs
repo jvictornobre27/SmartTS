@@ -122,7 +122,6 @@ parseAtom =
     <|> parseRecordExpr
     <|> parseBool
     <|> parseInt
-    <|> parseFailWith
     <|> parseVar
     <|> parens parseExpr
 
@@ -159,12 +158,6 @@ parseUnit = do
   _ <- symbol "()"
   return Unit
 
-parseFailWith :: Parser Expr
-parseFailWith = do
-  _ <- reserved "fail_with"
-  payload <- parens parseExpr
-  return $ FailWith payload
-
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
@@ -180,6 +173,7 @@ parseStmt =
     <|> parseValDeclStmt
     <|> parseReturn
     <|> parseRequire
+    <|> parseFailWithStmt -- NOVO: Adicionado como uma alternativa de statement
     <|> parseAssignment
     <|> parseBlock
 
@@ -257,6 +251,13 @@ parseRequire = do
   _ <- symbol ")"
   _ <- symbol ";"
   return $ RequireStmt cond payload
+
+parseFailWithStmt :: Parser Stmt
+parseFailWithStmt = do
+  _ <- reserved "fail_with"
+  payload <- parens parseExpr
+  _ <- symbol ";"
+  return $ FailWithStmt payload
 
 parseBlock :: Parser Stmt
 parseBlock = do
