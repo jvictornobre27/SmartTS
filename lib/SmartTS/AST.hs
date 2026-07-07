@@ -30,7 +30,6 @@ data Type = TInt
           | TBool
           | TUnit
           | TRecord [(Name, Type)]
-          | TNever  -- Bottom type: fail_with returns never
   deriving (Eq, Show)
 
 type Name = String
@@ -56,7 +55,7 @@ data Expr = CInt Int
           | Gte Expr Expr
           | Record [(Name, Expr)]
           | Unit
-          | FailWith Expr  -- fail_with(payload): abort with payload
+          | FailWith Expr -- Mantido apenas internamente para representação do sinal de aborto no interpretador
   deriving (Eq, Show)
 
 type MethodBody = Stmt
@@ -77,6 +76,7 @@ data Stmt = AssignmentStmt LValue Expr
           | ReturnStmt Expr
           | RequireStmt Expr Expr             -- require(condition, payload)
           | SequenceStmt [Stmt]
+          | FailWithStmt Expr -- NOVO: fail_with agora é oficialmente um Statement
   deriving (Eq, Show)
 
 findMethods :: MethodKind -> Contract -> [MethodDecl]
