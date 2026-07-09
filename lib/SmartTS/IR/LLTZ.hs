@@ -50,7 +50,6 @@ data Type
   | TInt
   | TString
   | TUnit
-  | TNever
   deriving (Eq, Show)
 
 -- ---------------------------------------------------------------------------
