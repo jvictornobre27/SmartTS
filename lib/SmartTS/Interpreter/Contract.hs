@@ -28,8 +28,11 @@ execMethod c m params = do
           , rtLocals  = M.empty
           , rtMethods = buildMethodMap c
           }
-  (_, rt') <- runStateT (execStmt (methodBody m)) initialRt
-  return rt'
+  case runStateT (execStmt (methodBody m)) initialRt of
+    Left (RuntimeError msg) -> Left msg
+    Left (Aborted payload)  ->
+      Left $ "Origination aborted via fail_with/require with payload: " ++ show payload
+    Right (_, rt')          -> Right rt'
 
 execMethodWithInitialStorage ::
   TypedContract ->
@@ -45,7 +48,10 @@ execMethodWithInitialStorage c initialStorage m params =
           , rtLocals  = M.empty
           , rtMethods = buildMethodMap c
           }
-   in runStateT (execStmt (methodBody m)) initialRt
+   in case runStateT (execStmt (methodBody m)) initialRt of
+        Left (RuntimeError msg) -> Left msg
+        Left (Aborted payload)  -> Right (Just (FailWith (exprAnn payload) payload), initialRt)
+        Right (mRet, rt')       -> Right (mRet, rt')
 
 findEntryPointByName :: TypedContract -> Name -> Either String (MethodDecl Type)
 findEntryPointByName c name =

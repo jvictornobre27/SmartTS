@@ -30,7 +30,6 @@ data Type = TInt
           | TBool
           | TUnit
           | TRecord [(Name, Type)]
-          | TNever
   deriving (Eq, Show)
 
 type Name = String
@@ -105,7 +104,8 @@ data Stmt a
   | WhileStmt (Expr a) (Stmt a)                 -- (condition, body)
   | ReturnStmt (Expr a)
   | SequenceStmt [Stmt a]
-  | RequireStmt (Expr a) (Expr a)
+  | RequireStmt (Expr a) (Expr a)   -- (condition, abort payload)
+  | FailWithStmt (Expr a)           -- (abort payload) -- unconditional abort
   deriving (Eq, Show)
 
 -- | Type aliases for the two phases of the compilation pipeline.
@@ -131,7 +131,3 @@ isEntryPointMethod m = methodKind m == EntryPoint
 
 isOriginateMethod :: MethodDecl a -> Bool
 isOriginateMethod m = methodKind m == Originate
-
-desugarRequire :: TypedExpr -> TypedExpr -> TypedStmt
-desugarRequire cond payload =
-  IfStmt (Not TBool cond) (ReturnStmt (FailWith TNever payload)) Nothing

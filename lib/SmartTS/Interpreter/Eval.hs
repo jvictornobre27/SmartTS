@@ -53,11 +53,11 @@ evalExpr (Mul _ a b) = intBin a b (*)
 evalExpr (Div _ a b) = do
   x <- evalInt a
   y <- evalInt b
-  if y == 0 then lift (Left "Division by zero.") else return (CInt TInt (x `div` y))
+  if y == 0 then lift (Left (RuntimeError "Division by zero.")) else return (CInt TInt (x `div` y))
 evalExpr (Mod _ a b) = do
   x <- evalInt a
   y <- evalInt b
-  if y == 0 then lift (Left "Modulo by zero.") else return (CInt TInt (x `mod` y))
+  if y == 0 then lift (Left (RuntimeError "Modulo by zero.")) else return (CInt TInt (x `mod` y))
 evalExpr (Eq  _ a b) = CBool TBool <$> ((==) <$> evalExpr a <*> evalExpr b)
 evalExpr (Neq _ a b) = CBool TBool <$> ((/=) <$> evalExpr a <*> evalExpr b)
 evalExpr (Lt  _ a b) = intCmp a b (<)
@@ -80,9 +80,8 @@ evalExpr (Call _ name args) = do
   case mRet of
     Nothing -> interpretBug ("method `" ++ name ++ "` did not return a value after type check")
     Just v  -> return v
-evalExpr (FailWith _ payload) = do
-  v <- evalExpr payload
-  return (FailWith TNever v)
+evalExpr (FailWith _ _) =
+  interpretBug "FailWith cannot appear inside a well-typed AST"
 
 -- ---------------------------------------------------------------------------
 -- Statement execution
@@ -125,7 +124,10 @@ execStmt (WhileStmt cond body) = loop
             Nothing -> loop
         _ -> interpretBug "while condition was not bool after type check"
 execStmt (RequireStmt cond payload) =
-  execStmt (desugarRequire cond payload)
+  execStmt (IfStmt (Not TBool cond) (FailWithStmt payload) Nothing)
+execStmt (FailWithStmt payload) = do
+  v <- evalExpr payload
+  lift (Left (Aborted v))
 
 execSequence :: [TypedStmt] -> EvalM (Maybe TypedExpr)
 execSequence [] = return Nothing
@@ -165,7 +167,7 @@ flattenLValue LStorage      acc = (LStorage, acc)
 flattenLValue (LVar n)      acc = (LVar n, acc)
 flattenLValue (LField p fld) acc = flattenLValue p (fld : acc)
 
-resolveRootExpr :: Runtime -> LValue -> Either String TypedExpr
+resolveRootExpr :: Runtime -> LValue -> Either EvalError TypedExpr
 resolveRootExpr rt LStorage =
   case rtStorage rt of
     Nothing -> Right (Record (TRecord []) [])
@@ -179,7 +181,7 @@ resolveRootExpr rt (LVar n) =
         Nothing -> interpretBug ("unknown root for field update `" ++ n ++ "` after type check")
 resolveRootExpr _ _ = interpretBug "invalid root for field update"
 
-setFieldPath :: TypedExpr -> [Name] -> TypedExpr -> Either String TypedExpr
+setFieldPath :: TypedExpr -> [Name] -> TypedExpr -> Either EvalError TypedExpr
 setFieldPath _ [] _          = interpretBug "empty field path in assignment"
 setFieldPath base [f] v      = setField base f v
 setFieldPath base (f : fs) v = do
@@ -187,7 +189,7 @@ setFieldPath base (f : fs) v = do
   child' <- setFieldPath child fs v
   setField base f child'
 
-getOrCreateField :: TypedExpr -> Name -> Either String TypedExpr
+getOrCreateField :: TypedExpr -> Name -> Either EvalError TypedExpr
 getOrCreateField (Record _ fields) f =
   case lookup f fields of
     Just v  -> Right v
@@ -195,7 +197,7 @@ getOrCreateField (Record _ fields) f =
 getOrCreateField (Unit _) _ = Right (Record (TRecord []) [])
 getOrCreateField _ _ = interpretBug "field path through non-record value after type check"
 
-setField :: TypedExpr -> Name -> TypedExpr -> Either String TypedExpr
+setField :: TypedExpr -> Name -> TypedExpr -> Either EvalError TypedExpr
 setField (Record ty fields) f v = Right (Record ty (insertOrReplace f v fields))
 setField (Unit _) f v           = Right (Record (TRecord [(f, exprAnn v)]) [(f, v)])
 setField _ _ _                  = interpretBug "setField on non-record after type check"

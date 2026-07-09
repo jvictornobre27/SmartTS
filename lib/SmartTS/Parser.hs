@@ -118,8 +118,7 @@ parseAtomOrStorage =
 
 parseAtom :: Parser ParsedExpr
 parseAtom =
-  parseFailWith
-    <|> parseUnit
+  parseUnit
     <|> parseRecordExpr
     <|> parseBool
     <|> parseInt
@@ -164,12 +163,6 @@ parseUnit = do
   _ <- symbol "()"
   return (Unit ())
 
-parseFailWith :: Parser ParsedExpr
-parseFailWith = do
-  _ <- reserved "fail_with"
-  payload <- parens parseExpr
-  return (FailWith () payload)
-
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
@@ -179,7 +172,8 @@ braces = between (symbol "{") (symbol "}")
 -- Statements
 parseStmt :: Parser ParsedStmt
 parseStmt =
-  parseRequire
+  parseFailWithStmt
+    <|> parseRequire
     <|> parseIfStmt
     <|> parseWhileStmt
     <|> parseVarDeclStmt
@@ -187,6 +181,13 @@ parseStmt =
     <|> parseReturn
     <|> parseAssignment
     <|> parseBlock
+
+parseFailWithStmt :: Parser ParsedStmt
+parseFailWithStmt = do
+  _ <- reserved "fail_with"
+  payload <- parens parseExpr
+  _ <- symbol ";"
+  return (FailWithStmt payload)
 
 parseRequire :: Parser ParsedStmt
 parseRequire = do

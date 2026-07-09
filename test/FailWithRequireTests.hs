@@ -1,10 +1,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- Unit tests for Project 5: fail_with and require.
+--
+-- Per the project spec, both `fail_with` and `require` are STATEMENTS, not
+-- expressions: `fail_with(payload);` unconditionally aborts, and
+-- `require(cond, payload);` desugars to `if (!cond) { fail_with(payload); }`.
+-- Neither can be nested inside another expression (e.g. `return fail_with(x);`
+-- and `1 + fail_with(x)` are both parse errors) -- that is precisely what
+-- makes them valid in any statement position regardless of the enclosing
+-- method's declared return type, without needing a general subtyping story
+-- for a bottom-typed *expression*.
+--
 -- Covers:
---   * Parser  - new syntax produces correct AST nodes
---   * Type checker - bottom type (never), subtyping, require validation
---   * Interpreter - runtime abort, desugaring, storage semantics
+--   * Parser        - new syntax produces correct AST nodes (FailWithStmt / RequireStmt)
+--   * Type checker  - fail_with's payload is checked but unconstrained by context
+--   * Interpreter   - abort semantics, short-circuiting, transactional rollback,
+--                      require's desugaring, propagation through @private calls
 module FailWithRequireTests (failWithRequireTests) where
 
 import Test.Tasty
@@ -88,28 +99,38 @@ assertFailureIO msg = assertFailure msg >> error "unreachable"
 p5ParserTests :: TestTree
 p5ParserTests =
   testGroup "Parser"
-  [ testCase "fail_with(int) produces FailWith node" $
+  [ testCase "fail_with(payload); produces a FailWithStmt node" $
       parseOk
         "contract C { storage: { x: int }; \
-        \ @entrypoint f(): int { return fail_with(42); } }"
+        \ @entrypoint f(): int { fail_with(42); } }"
         $ \c -> case c of
             Contract _ _
               [MethodDecl EntryPoint "f" [] TInt
-                (SequenceStmt [ReturnStmt (FailWith _ (CInt _ 42))])] ->
+                (SequenceStmt [FailWithStmt (CInt _ 42)])] ->
                   return ()
             _ -> assertFailure $ "Unexpected AST: " ++ show c
 
   , testCase "fail_with payload can be an expression" $
       parseOk
         "contract C { storage: { x: int }; \
-        \ @entrypoint f(v: int): int { return fail_with(v + 1); } }"
+        \ @entrypoint f(v: int): int { fail_with(v + 1); } }"
         $ \c -> case c of
             Contract _ _
               [MethodDecl EntryPoint "f" [FormalParameter "v" TInt] TInt
                 (SequenceStmt
-                  [ReturnStmt (FailWith _ (Add _ (Var _ "v") (CInt _ 1)))])] ->
+                  [FailWithStmt (Add _ (Var _ "v") (CInt _ 1))])] ->
                       return ()
             _ -> assertFailure $ "Unexpected AST: " ++ show c
+
+  , testCase "fail_with is a statement - NOT usable inside `return`" $
+      parseFails
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(): int { return fail_with(42); } }"
+
+  , testCase "fail_with is a statement - NOT usable nested in an expression" $
+      parseFails
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(): int { return 1 + fail_with(2); } }"
 
   , testCase "require(cond, payload) produces RequireStmt" $
       parseOk
@@ -154,9 +175,15 @@ p5ParserTests =
       parseOk
         "contract C { storage: { x: int }; \
         \ @entrypoint f(b: bool): int \
-        \   { if (b) { return fail_with(1); } else { return 0; } } }"
+        \   { if (b) { fail_with(1); } else { return 0; } } }"
         $ \c -> case c of
-            Contract _ _ [MethodDecl EntryPoint "f" _ TInt _] -> return ()
+            Contract _ _
+              [MethodDecl EntryPoint "f" _ TInt
+                (SequenceStmt
+                  [IfStmt (Var _ "b")
+                    (SequenceStmt [FailWithStmt (CInt _ 1)])
+                    (Just (SequenceStmt [ReturnStmt (CInt _ 0)]))])] ->
+                      return ()
             _ -> assertFailure $ "Unexpected AST: " ++ show c
 
   , testCase "fail_with is a reserved word - cannot be used as identifier" $
@@ -168,6 +195,11 @@ p5ParserTests =
       parseFails
         "contract C { storage: { x: int }; \
         \ @entrypoint f(): int { val require: int = 1; return require; } }"
+
+  , testCase "fail_with with no trailing semicolon is a parse error" $
+      parseFails
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(): int { fail_with(1) } }"
   ]
 
 -- 2. Type-checker tests
@@ -175,34 +207,45 @@ p5ParserTests =
 p5TypeCheckTests :: TestTree
 p5TypeCheckTests =
   testGroup "Type Checker"
-  [ testCase "fail_with has type never - accepted where int expected" $
+  [ testCase "fail_with type-checks in an int-returning method" $
       tcOk
         "contract C { storage: { x: int }; \
         \ @entrypoint f(b: bool): int \
-        \   { if (b) { return fail_with(99); } else { return 0; } } }"
+        \   { if (b) { fail_with(99); } else { return 0; } } }"
 
-  , testCase "fail_with has type never - accepted where bool expected" $
+  , testCase "fail_with type-checks in a bool-returning method" $
       tcOk
         "contract C { storage: { x: int }; \
         \ @entrypoint f(b: bool): bool \
-        \   { if (b) { return true; } else { return fail_with(0); } } }"
+        \   { if (b) { return true; } else { fail_with(0); } } }"
 
-  , testCase "fail_with has type never - accepted where unit expected" $
+  , testCase "fail_with type-checks in a unit-returning method" $
       tcOk
         "contract C { storage: { x: int }; \
-        \ @originate init(): unit { return fail_with(0); } }"
+        \ @originate init(): unit { fail_with(0); } }"
 
-  , testCase "all branches return or fail - no missing-return false positive" $
+  , testCase "fail_with's payload type has no bearing on the return type" $
+      tcOk
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(b: bool): int \
+        \   { if (b) { fail_with(true); } else { return 0; } } }"
+
+  , testCase "fail_with nested in if/else does not cause a false positive" $
       tcOk
         "contract C { storage: { x: int }; \
         \ @entrypoint f(v: int): int \
         \   { if (v > 10) { return 100; } \
-        \     else { if (v > 0) { return v; } else { return fail_with(42); } } } }"
+        \     else { if (v > 0) { return v; } else { fail_with(42); } } } }"
 
-  , testCase "fail_with payload is type-checked - rejects ill-typed payload" $
+  , testCase "fail_with payload is still type-checked on its own terms" $
       tcFails
         "contract C { storage: { x: int }; \
-        \ @entrypoint f(): int { return fail_with(true + 1); } }"
+        \ @entrypoint f(): int { fail_with(true + 1); } }"
+
+  , testCase "fail_with payload referencing an unknown variable is rejected" $
+      tcFails
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(): int { fail_with(doesNotExist); } }"
 
   , testCase "require with bool condition is well-typed" $
       tcOk
@@ -239,12 +282,12 @@ p5TypeCheckTests =
 p5InterpreterTests :: TestTree
 p5InterpreterTests =
   testGroup "Interpreter"
-  [ testCase "fail_with taken branch - returns FailWith value" $ do
+  [ testCase "fail_with taken branch - reports FailWith with the payload" $ do
       let src = unlines
             [ "contract C { storage: { x: int };"
             , "  @originate init(): unit { storage.x = 0; return (); }"
             , "  @entrypoint f(b: bool): int"
-            , "    { if (b) { return fail_with(99); } else { return storage.x; } }"
+            , "    { if (b) { fail_with(99); } else { return storage.x; } }"
             , "}"
             ]
       (addr, repo) <- originate src
@@ -260,7 +303,7 @@ p5InterpreterTests =
             [ "contract C { storage: { x: int };"
             , "  @originate init(): unit { storage.x = 7; return (); }"
             , "  @entrypoint f(b: bool): int"
-            , "    { if (b) { return fail_with(99); } else { return storage.x; } }"
+            , "    { if (b) { fail_with(99); } else { return storage.x; } }"
             , "}"
             ]
       (addr, repo) <- originate src
@@ -269,6 +312,89 @@ p5InterpreterTests =
       case callEntrypointWithJsonArgs repo tc addr "f" src args of
         Right (Just (CInt _ 7), _) -> return ()
         Right (v, _) -> assertFailure $ "Expected CInt 7, got: " ++ show v
+        Left  err    -> assertFailure $ "Unexpected error: " ++ err
+
+  , testCase "fail_with short-circuits - later statements in the block do not run" $ do
+      let src = unlines
+            [ "contract C { storage: { x: int };"
+            , "  @originate init(): unit { storage.x = 0; return (); }"
+            , "  @entrypoint f(): int"
+            , "    { storage.x = 1; fail_with(0); storage.x = 999; return storage.x; }"
+            , "}"
+            ]
+      (addr, repo) <- originate src
+      tc <- parseIO src >>= tcIO
+      case callEntrypointWithJsonArgs repo tc addr "f" src (object []) of
+        Right (Just (FailWith _ (CInt _ 0)), _) -> return ()
+        Right (v, _) -> assertFailure $ "Expected abort, got: " ++ show v
+        Left  err    -> assertFailure $ "Unexpected error: " ++ err
+
+  , testCase "fail_with rolls back storage mutations made earlier in the SAME call" $ do
+      -- This is the key transactional property: unlike a plain early return,
+      -- fail_with must undo *everything* the call did, not just whatever
+      -- happens to textually follow it. `storage.x = 1;` runs before the
+      -- abort, so a naive "just stop running statements" interpreter would
+      -- incorrectly persist it.
+      let src = unlines
+            [ "contract C { storage: { x: int };"
+            , "  @originate init(): unit { storage.x = 0; return (); }"
+            , "  @entrypoint f(): int"
+            , "    { storage.x = 1; fail_with(0); }"
+            , "}"
+            ]
+      (addr, repo) <- originate src
+      tc <- parseIO src >>= tcIO
+      case callEntrypointWithJsonArgs repo tc addr "f" src (object []) of
+        Right (Just (FailWith _ (CInt _ 0)), repo') ->
+          case M.lookup addr repo' of
+            Nothing -> assertFailure "Address not found in repo"
+            Just ci -> case instanceStorage ci of
+              Record _ [("x", CInt _ 0)] -> return ()
+              other -> assertFailure $ "Storage was mutated despite abort: " ++ show other
+        Right (v, _) -> assertFailure $ "Expected abort, got: " ++ show v
+        Left  err    -> assertFailure $ "Unexpected error: " ++ err
+
+  , testCase "fail_with inside a called @private method aborts the whole entrypoint" $ do
+      -- The abort must propagate out of the Call expression, not be treated
+      -- as if the helper had simply "returned" its payload as a value.
+      let src = unlines
+            [ "contract C { storage: { x: int };"
+            , "  @originate init(): unit { storage.x = 0; return (); }"
+            , "  @entrypoint f(v: int): int"
+            , "    { storage.x = 1; return 10 + guard(v); }"
+            , "  @private guard(v: int): int"
+            , "    { if (v < 0) { fail_with(7); } return v; }"
+            , "}"
+            ]
+      (addr, repo) <- originate src
+      tc <- parseIO src >>= tcIO
+      let args = object ["v" .= ((-1) :: Int)]
+      case callEntrypointWithJsonArgs repo tc addr "f" src args of
+        Right (Just (FailWith _ (CInt _ 7)), repo') ->
+          case M.lookup addr repo' of
+            Nothing -> assertFailure "Address not found in repo"
+            Just ci -> case instanceStorage ci of
+              Record _ [("x", CInt _ 0)] -> return ()
+              other -> assertFailure $ "Storage was mutated despite abort: " ++ show other
+        Right (v, _) -> assertFailure $ "Expected abort, got: " ++ show v
+        Left  err    -> assertFailure $ "Unexpected error: " ++ err
+
+  , testCase "@private call succeeding normally still returns its value" $ do
+      let src = unlines
+            [ "contract C { storage: { x: int };"
+            , "  @originate init(): unit { storage.x = 0; return (); }"
+            , "  @entrypoint f(v: int): int"
+            , "    { return 10 + guard(v); }"
+            , "  @private guard(v: int): int"
+            , "    { if (v < 0) { fail_with(7); } return v; }"
+            , "}"
+            ]
+      (addr, repo) <- originate src
+      tc <- parseIO src >>= tcIO
+      let args = object ["v" .= (5 :: Int)]
+      case callEntrypointWithJsonArgs repo tc addr "f" src args of
+        Right (Just (CInt _ 15), _) -> return ()
+        Right (v, _) -> assertFailure $ "Expected CInt 15, got: " ++ show v
         Left  err    -> assertFailure $ "Unexpected error: " ++ err
 
   , testCase "require passing - execution continues, result returned" $ do
@@ -377,7 +503,7 @@ p5InterpreterTests =
             [ "contract C { storage: { x: int };"
             , "  @originate init(): unit { storage.x = 10; return (); }"
             , "  @entrypoint f(v: int): int"
-            , "    { return fail_with(v * 3 + 1); }"
+            , "    { fail_with(v * 3 + 1); }"
             , "}"
             ]
       (addr, repo) <- originate src
@@ -387,4 +513,18 @@ p5InterpreterTests =
         Right (Just (FailWith _ (CInt _ 13)), _) -> return ()
         Right (v, _) -> assertFailure $ "Expected FailWith(CInt 13), got: " ++ show v
         Left  err    -> assertFailure $ "Unexpected error: " ++ err
+
+  , testCase "an @originate method that aborts fails origination outright" $ do
+      let src = unlines
+            [ "contract C { storage: { x: int };"
+            , "  @originate init(n: int): unit"
+            , "    { require(n > 0, 1); storage.x = n; return (); }"
+            , "}"
+            ]
+      c <- parseIO src
+      tc <- tcIO c
+      let args = object ["n" .= ((-5) :: Int)]
+      case originateWithJsonArgs M.empty tc src args of
+        Left _  -> return ()
+        Right _ -> assertFailure "Expected origination to fail when init() aborts"
   ]

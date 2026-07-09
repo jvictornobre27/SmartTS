@@ -151,6 +151,9 @@ checkStmt (RequireStmt cond payload) = do
   lift $ expectType "require condition" (exprAnn tc) TBool
   tp <- inferExpr payload
   return (RequireStmt tc tp)
+checkStmt (FailWithStmt payload) = do
+  tp <- inferExpr payload
+  return (FailWithStmt tp)
 
 noDuplicateLocal :: Name -> TcM ()
 noDuplicateLocal n = do
@@ -260,9 +263,8 @@ inferExpr (Call () name args) = do
         targs
         expected
       return (Call (returnType sig) name targs)
-inferExpr (FailWith () payload) = do
-  tp <- inferExpr payload
-  return (FailWith TNever tp)
+inferExpr (FailWith () _) =
+  tcError "internal: `fail_with` cannot appear as an expression."
 
 inferBoolBin :: (Expr Type -> Expr Type -> Expr Type) -> Expr () -> Expr () -> TcM (Expr Type)
 inferBoolBin con a b = do
@@ -302,13 +304,9 @@ inferEq con a b = do
           ++ prettyType (exprAnn tb)
           ++ ")."
 
-isAssignableTo :: Type -> Type -> Bool
-isAssignableTo TNever _        = True
-isAssignableTo got    expected = typesEqual got expected
-
 expectType :: String -> Type -> Type -> Either String ()
 expectType ctx got expected =
-  if isAssignableTo got expected
+  if typesEqual got expected
     then Right ()
     else
       Left $
@@ -318,7 +316,6 @@ typesEqual :: Type -> Type -> Bool
 typesEqual TInt    TInt    = True
 typesEqual TBool   TBool   = True
 typesEqual TUnit   TUnit   = True
-typesEqual TNever  TNever  = True
 typesEqual (TRecord as) (TRecord bs) = length as == length bs && and (zipWith fieldEq as bs)
   where
     fieldEq (n1, t1) (n2, t2) = n1 == n2 && typesEqual t1 t2
@@ -328,7 +325,6 @@ prettyType :: Type -> String
 prettyType TInt   = "int"
 prettyType TBool  = "bool"
 prettyType TUnit  = "unit"
-prettyType TNever = "never"
 prettyType (TRecord fs) =
   "{"
     ++ concat

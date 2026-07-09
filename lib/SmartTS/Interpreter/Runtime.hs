@@ -34,7 +34,14 @@ data Runtime = Runtime
   }
   deriving (Eq, Show)
 
-type EvalM = StateT Runtime (Either String)
+-- | Everything that can stop expression evaluation / statement execution
+-- short of a normal result.
+data EvalError
+  = RuntimeError String
+  | Aborted TypedExpr
+  deriving (Eq, Show)
+
+type EvalM = StateT Runtime (Either EvalError)
 
 -- NOTE: I expect the students should not have to read / update the following
 -- function definitions.
