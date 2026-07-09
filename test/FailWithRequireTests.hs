@@ -26,6 +26,8 @@ import qualified Data.Map.Strict as M
 import SmartTS.IR.AST
 import SmartTS.Parser        (parseContractFromString)
 import SmartTS.TypeCheck     (typeCheckContract)
+import SmartTS.CodeGen.CompileLLTZ (translateStatement)
+import qualified SmartTS.IR.LLTZ as L
 import SmartTS.Interpreter
   ( ContractInstance (..)
   , RepositoryState
@@ -43,6 +45,7 @@ failWithRequireTests =
     [ p5ParserTests
     , p5TypeCheckTests
     , p5InterpreterTests
+    , p5CodeGenTests
     ]
 
 -- Shared helpers
@@ -527,4 +530,112 @@ p5InterpreterTests =
       case originateWithJsonArgs M.empty tc src args of
         Left _  -> return ()
         Right _ -> assertFailure "Expected origination to fail when init() aborts"
+  ]
+
+-- 4. Code-generator tests (Milestone 3)
+--
+-- These check the LLTZ output of `translateStatement` for fail_with and
+-- require. Key properties:
+--   * `fail_with` maps to Michelson's FAILWITH primitive.
+--   * `require` reuses the same if/fail_with desugaring as the interpreter.
+--   * The IF join rule mirrors Michelson: a failing branch imposes no
+--     constraint; the IF's type comes from the non-failing branch.
+--   * Code after `fail_with` is unreachable and must be dropped (Michelson
+--     rejects instructions after FAILWITH).
+
+-- Parse + type check a contract and translate the body of its first method.
+codegenOf :: String -> IO L.Expr
+codegenOf src = do
+  c  <- parseIO src
+  tc <- tcIO c
+  case contractMethods tc of
+    (m : _) -> return (translateStatement (methodBody m))
+    []      -> assertFailureIO "Contract has no methods."
+
+p5CodeGenTests :: TestTree
+p5CodeGenTests =
+  testGroup "Code Generator (LLTZ)"
+  [ testCase "fail_with(42); compiles to FAILWITH with the payload" $ do
+      e <- codegenOf
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(): int { fail_with(42); } }"
+      case e of
+        L.Expr (L.Prim L.PrimFailwith
+                 [L.Expr (L.Const (L.CInt 42)) L.TInt]) _ -> return ()
+        _ -> assertFailure $ "Unexpected LLTZ: " ++ show e
+
+  , testCase "require compiles to IF (NOT cond) FAILWITH, like the interpreter" $ do
+      e <- codegenOf
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(b: bool): int { require(b, 7); return 1; } }"
+      case e of
+        L.Expr (L.LetIn (L.Var "_")
+                 (L.Expr (L.IfBool
+                    (L.Expr (L.Prim L.PrimNot
+                      [L.Expr (L.Variable (L.Var "b")) L.TBool]) L.TBool)
+                    (L.Expr (L.Prim L.PrimFailwith
+                      [L.Expr (L.Const (L.CInt 7)) L.TInt]) L.TUnit)
+                    (L.Expr L.Skip L.TUnit)) L.TUnit)
+                 (L.Expr (L.Const (L.CInt 1)) L.TInt))
+               L.TInt -> return ()
+        _ -> assertFailure $ "Unexpected LLTZ: " ++ show e
+
+  , testCase "IF join rule: failing branch takes the other branch's type" $ do
+      -- Michelson's typing of IF: a branch ending in FAILWITH imposes no
+      -- constraint, so the IF's result type comes from the else branch (int),
+      -- and the failing branch is re-instantiated at that type.
+      e <- codegenOf
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(b: bool): int \
+        \   { if (b) { fail_with(1); } else { return 0; } } }"
+      case e of
+        L.Expr (L.IfBool _
+                 (L.Expr (L.Prim L.PrimFailwith _) L.TInt)
+                 (L.Expr (L.Const (L.CInt 0)) L.TInt))
+               L.TInt -> return ()
+        _ -> assertFailure $ "Unexpected LLTZ: " ++ show e
+
+  , testCase "both branches failing yields a unit-typed IF" $ do
+      e <- codegenOf
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(b: bool): int \
+        \   { if (b) { fail_with(1); } else { fail_with(2); } } }"
+      case e of
+        L.Expr (L.IfBool _
+                 (L.Expr (L.Prim L.PrimFailwith _) L.TUnit)
+                 (L.Expr (L.Prim L.PrimFailwith _) L.TUnit))
+               L.TUnit -> return ()
+        _ -> assertFailure $ "Unexpected LLTZ: " ++ show e
+
+  , testCase "statements after fail_with are dropped (dead code)" $ do
+      -- Michelson rejects instructions after FAILWITH, so the block must
+      -- end at the abort: no LetIn chain, no trace of the `return 999`.
+      e <- codegenOf
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(): int { fail_with(1); return 999; } }"
+      case e of
+        L.Expr (L.Prim L.PrimFailwith
+                 [L.Expr (L.Const (L.CInt 1)) L.TInt]) _ -> return ()
+        _ -> assertFailure $ "Unexpected LLTZ: " ++ show e
+
+  , testCase "require(v > 0, ...) condition compiles via COMPARE + GT" $ do
+      -- Michelson has no binary comparisons: `v > 0` is GT applied to
+      -- COMPARE's int result, and require then negates it with NOT.
+      e <- codegenOf
+        "contract C { storage: { x: int }; \
+        \ @entrypoint f(v: int): int { require(v > 0, 1); return v; } }"
+      case e of
+        L.Expr (L.LetIn (L.Var "_")
+                 (L.Expr (L.IfBool
+                    (L.Expr (L.Prim L.PrimNot
+                      [L.Expr (L.Prim L.PrimGt
+                        [L.Expr (L.Prim L.PrimCompare
+                          [ L.Expr (L.Variable (L.Var "v")) L.TInt
+                          , L.Expr (L.Const (L.CInt 0)) L.TInt
+                          ]) L.TInt]) L.TBool]) L.TBool)
+                    (L.Expr (L.Prim L.PrimFailwith _) L.TUnit)
+                    (L.Expr L.Skip L.TUnit)) L.TUnit)
+                 (L.Expr (L.Variable (L.Var "v")) L.TInt))
+               L.TInt -> return ()
+        _ -> assertFailure $ "Unexpected LLTZ: " ++ show e
   ]
